@@ -8,6 +8,8 @@ The original mynav repo doesn't work with IDA 7.0,I make it work with IDA 7.0
 
 ## Usage
 
-在ida完成对一个目标文件的分析后,`File|Script File|`选择mynav.py(或mybrowser.py或myexport.py),然后在`Edit|Plugins|MyNav|`中可看到如下子菜单
+在ida完成对一个目标文件的分析后,`File|Script File`选择`mynav.py`(或`mybrowser.py`或`myexport.py`),然后在`Edit|Plugins|MyNav`中可看到如下子菜单
 
-<img src="https://raw.githubusercontent.com/3xp10it/pic/master/mynav.png">
+![mynav][1]
+
+[1]: https://raw.githubusercontent.com/3xp10it/pic/master/mynav.png
