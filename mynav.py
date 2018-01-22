@@ -1,3 +1,4 @@
+
 #!/usr/bin/python
 
 """
@@ -25,6 +26,7 @@ import os
 import sys
 import time
 import random
+import idaapi
 try:
     import sqlite3
     hasSqlite = True
@@ -98,7 +100,188 @@ class FunctionsGraph(GraphViewer):
         
         return True
 
-class CMyNav:
+
+class Mn_Menu_Context(idaapi.action_handler_t):
+
+    @classmethod
+    def get_name(self):
+        return self.__name__
+
+    @classmethod
+    def get_label(self):
+        return self.label
+
+    @classmethod
+    def register(self, plugin, label):
+        self.plugin = plugin
+        self.label = label
+        instance = self()
+        return idaapi.register_action(idaapi.action_desc_t(
+            self.get_name(),  # Name. Acts as an ID. Must be unique.
+            instance.get_label(),  # Label. That's what users see.
+            instance  # Handler. Called when activated, and for updating
+        ))
+
+    @classmethod
+    def unregister(self):
+        """Unregister the action.
+        After unregistering the class cannot be used.
+        """
+        idaapi.unregister_action(self.get_name())
+
+    @classmethod
+    def activate(self, ctx):
+        # dummy method
+        return 1
+
+    @classmethod
+    def update(self, ctx):
+        try:
+            if ctx.form_type == idaapi.BWN_DISASM:
+                return idaapi.AST_ENABLE_FOR_FORM
+            else:
+                return idaapi.AST_DISABLE_FOR_FORM
+        except:
+            # Add exception for main menu on >= IDA 7.0
+            return idaapi.AST_ENABLE_ALWAYS
+
+
+
+class DeleteALLSessions(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.clearSessions()
+        return 1
+
+
+class DeleteASession(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.deleteSession()
+        return 1
+
+class AdvancedDeselectionOptions(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.deselectAdvanced()
+        return 1
+
+class AdvancedSelectionOptions(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.selectAdvanced()
+        return 1
+
+class DeselectHitsFromSession(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.loadBreakpointsFromSessionInverse()
+        return 1
+
+class SelectHitsFromSession(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.loadBreakpointsFromSession()
+        return 1
+
+class ClearAllBreakpoints(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.clearBreakpoints()
+        return 1
+
+class SetAllBreakpoints(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.setBreakpoints()
+        return 1
+
+class AddRemoveTargetPoint(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.addRemoveTargetPoint()
+        return 1
+
+class AddRemoveEntryPoint(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.addRemoveEntryPoint()
+        return 1
+
+class ClearTraceSession(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.clearTraceSession()
+        return 1
+
+class SessionsFunctionsList(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.showSessionsFunctions()
+        return 1
+
+class ShowSessionsManager(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.showSessionsManager()
+        return 1
+
+class ShowAdvancedOptions(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.showAdvanced()
+        return 1
+
+class ShowTraceSession(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.showTraceSession()
+        return 1
+
+class ShowSession(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.showSessionsGraph()
+        return 1
+
+class ShowBrowser(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.showBrowser()
+        return 1
+
+class ConfigureCPURecording(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.configureSaveCPU()
+        return 1
+
+class Configuretimeout(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.configureTimeout()
+        return 1
+
+class NewAdvancedSession(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.newAdvancedSession()
+        return 1
+
+
+class TraceThisFunction(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.traceInFunction()
+        return 1
+
+class TraceInSession(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.traceInSession()
+        return 1
+
+class NewSession(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.newSession()
+        return 1
+
+class OpenGraph(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.openSavedGraph()
+        return 1
+
+class RunAPythonScript(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.runScript()
+        return 1
+
+class AdvancedUtilities(Mn_Menu_Context):
+    def activate(self, ctx):
+        self.plugin.searchAdvanced()
+        return 1
+
+
+
+class CMyNav():
     def __init__(self):
         # Initialize basic properties
         self.db = None
@@ -126,6 +309,7 @@ class CMyNav:
         
         if hasSqlite:
             self._loadDatabase()
+
 
     def __del__(self):
         if self.db is not None:
@@ -1507,50 +1691,70 @@ class CMyNav:
         #idaapi.add_menu_item("Edit/Plugins/", "MyNav: Show simplified step trace session", "Ctrl+Alt+F6", 0, self.showSimplifiedTraceSession, None)
         #idaapi.add_menu_item("Edit/Plugins/", "MyNav: Trace code paths between 2 functions", None, 0, self.traceCodePaths, None)
         #idaapi.add_menu_item("Edit/Plugins/", "-", None, 0, self.doNothing, None)
-        idaapi.add_menu_item("Edit/Plugins/", "-", None, 0, self.doNothing, ())
+        #idaapi.add_menu_item("Edit/Plugins/", "-", None, 0, self.doNothing, ())
         if hasSqlite:
-            idaapi.add_menu_item("Edit/Plugins/", "MyNav: Delete ALL sessions", "", 0, self.clearSessions, ())
-            idaapi.add_menu_item("Edit/Plugins/", "MyNav: Delete a session", "", 0, self.deleteSession, ())
-            idaapi.add_menu_item("Edit/Plugins/", "-", None, 0, self.doNothing, ())
-        idaapi.add_menu_item("Edit/Plugins/", "MyNav: Advanced deselection options", "", 0, self.deselectAdvanced, ())
-        idaapi.add_menu_item("Edit/Plugins/", "MyNav: Advanced selection options", "", 0, self.selectAdvanced, ())
+            DeleteALLSessions.register(self, "Delete ALL sessions")
+            DeleteASession.register(self, "Delete a session")
+        AdvancedDeselectionOptions.register(self, "Advanced deselection options")
+        AdvancedSelectionOptions.register(self, "Advanced selection options")
+        if hasSqlite:
+            DeselectHitsFromSession.register(self, "Deselect hits from session")
+            SelectHitsFromSession.register(self,"Select hits from session")
+        ClearAllBreakpoints.register(self,"Clear all breakpoints")
+        SetAllBreakpoints.register(self,"Set all breakpoints")
+        if hasSqlite:
+            AddRemoveTargetPoint.register(self,"Add/Remove target point")
+            AddRemoveEntryPoint.register(self,"Add/Remove entry point")
+            ClearTraceSession.register(self,"Clear trace session")
+            SessionsFunctionsList.register(self,"Session's functions List")
+            ShowSessionsManager.register(self,"Show session's manager")
+            ShowAdvancedOptions.register(self,"Show advanced options")
+            ShowTraceSession.register(self,"Show trace session")
+            ShowSession.register(self,"Show session")
+        ShowBrowser.register(self,"Show browser")
+        if hasSqlite:
+            ConfigureCPURecording.register(self,"Configure CPU Recording")
+            Configuretimeout.register(self,"Configure timeout")
+            NewAdvancedSession.register(self,"New advanced session")
+            TraceThisFunction.register(self,"Trace this function")
+            TraceInSession.register(self,"Trace in session")
+            NewSession.register(self,"New session")
+            OpenGraph.register(self,"Open graph")
+        RunAPythonScript.register(self,"Run a python script")
+        AdvancedUtilities.register(self,"Advanced utilities")
+
+        
 
         if hasSqlite:
-            idaapi.add_menu_item("Edit/Plugins/", "MyNav: Deselect hits from session", "Ctrl+Shift+Alt+F9", 0, self.loadBreakpointsFromSessionInverse, ())
-            idaapi.add_menu_item("Edit/Plugins/", "MyNav: Select hits from session", "Ctrl+Alt+F9", 0, self.loadBreakpointsFromSession, ())
-        idaapi.add_menu_item("Edit/Plugins/", "MyNav: Clear all breakpoints", "", 0, self.clearBreakpoints, ())
-        idaapi.add_menu_item("Edit/Plugins/", "MyNav: Set all breakpoints", "Alt+F9", 0, self.setBreakpoints, ())
-        idaapi.add_menu_item("Edit/Plugins/", "-", None, 0, self.doNothing, ())
-        """
-        idaapi.add_menu_item("Edit/Plugins/", "MyNav: Remove target point", None, 0, self.removeCurrentTargetPoint, ())
-        idaapi.add_menu_item("Edit/Plugins/", "MyNav: Remove entry point", None, 0, self.removeCurrentDataEntryPoint, ())
-        idaapi.add_menu_item("Edit/Plugins/", "MyNav: Add target point", None, 0, self.addCurrentAsTargetPoint, ())
-        idaapi.add_menu_item("Edit/Plugins/", "MyNav: Add entry point", None, 0, self.addCurrentAsDataEntryPoint, ())
-        """
+            idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", DeleteALLSessions.get_name(), idaapi.SETMENU_APP)
+            idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", DeleteASession.get_name(), idaapi.SETMENU_APP)
+        idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", AdvancedDeselectionOptions.get_name(), idaapi.SETMENU_APP)
+        idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", AdvancedSelectionOptions.get_name(), idaapi.SETMENU_APP)
         if hasSqlite:
-            idaapi.add_menu_item("Edit/Plugins/", "MyNav: Add/Remove target point", None, 0, self.addRemoveTargetPoint, ())
-            idaapi.add_menu_item("Edit/Plugins/", "MyNav: Add/Remove entry point", None, 0, self.addRemoveEntryPoint, ())
-            idaapi.add_menu_item("Edit/Plugins/", "-", None, 0, self.doNothing, ())
-            idaapi.add_menu_item("Edit/Plugins/", "MyNav: Clear trace session", "", 0, self.clearTraceSession, ())
-            idaapi.add_menu_item("Edit/Plugins/", "MyNav: Session's functions List", "", 0, self.showSessionsFunctions, ())
-            #idaapi.add_menu_item("Edit/Plugins/", "MyNav: Show session's manager", "", 0, self.showSessionsManager, ())
-            idaapi.add_menu_item("Edit/Plugins/", "MyNav: Show advanced options", "Alt+F6", 0, self.showAdvanced, ())
-            idaapi.add_menu_item("Edit/Plugins/", "MyNav: Show trace session", "Ctrl+Alt+F6", 0, self.showTraceSession, ())
-            idaapi.add_menu_item("Edit/Plugins/", "MyNav: Show session", "Alt+F6", 0, self.showSessionsGraph, ())
-        idaapi.add_menu_item("Edit/Plugins/", "MyNav: Show browser", "Ctrl+Shift+B", 0, self.showBrowser, ())
-        idaapi.add_menu_item("Edit/Plugins/", "-", None, 0, self.doNothing, ())
+            idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", DeselectHitsFromSession.get_name(), idaapi.SETMENU_APP)
+            idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", SelectHitsFromSession.get_name(), idaapi.SETMENU_APP)
+        idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", ClearAllBreakpoints.get_name(), idaapi.SETMENU_APP)
+        idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", SetAllBreakpoints.get_name(), idaapi.SETMENU_APP)
         if hasSqlite:
-            idaapi.add_menu_item("Edit/Plugins/", "MyNav: Configure CPU Recording", None, 0, self.configureSaveCPU, ())
-            idaapi.add_menu_item("Edit/Plugins/", "MyNav: Configure timeout", None, 0, self.configureTimeout, ())
-            idaapi.add_menu_item("Edit/Plugins/", "MyNav: New advanced session", None, 0, self.newAdvancedSession, ())
-            idaapi.add_menu_item("Edit/Plugins/", "MyNav: Trace this function", "", 0, self.traceInFunction, ())
-            idaapi.add_menu_item("Edit/Plugins/", "MyNav: Trace in session", "Ctrl+Alt+F5", 0, self.traceInSession, ())
-            idaapi.add_menu_item("Edit/Plugins/", "MyNav: New session", "Alt+F5", 0, self.newSession, ())
-            #idaapi.add_menu_item("Edit/Plugins/", "-", None, 0, self.doNothing, ())
-            #idaapi.add_menu_item("Edit/Plugins/", "MyNav: Open graph", None, 0, self.openSavedGraph, ())
-            idaapi.add_menu_item("Edit/Plugins/", "-", None, 0, self.doNothing, ())
-        idaapi.add_menu_item("Edit/Plugins/", "MyNav: Run a python script", None, 0, self.runScript, ())
-        idaapi.add_menu_item("Edit/Plugins/", "MyNav: Advanced utilities", None, 0, self.searchAdvanced, ())
+            idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", AddRemoveTargetPoint.get_name(), idaapi.SETMENU_APP)
+            idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", AddRemoveEntryPoint.get_name(), idaapi.SETMENU_APP)
+            idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", ClearTraceSession.get_name(), idaapi.SETMENU_APP)
+            idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", SessionsFunctionsList.get_name(), idaapi.SETMENU_APP)
+            idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", ShowSessionsManager.get_name(), idaapi.SETMENU_APP)
+            idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", ShowAdvancedOptions.get_name(), idaapi.SETMENU_APP)
+            idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", ShowTraceSession.get_name(), idaapi.SETMENU_APP)
+            idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", ShowSession.get_name(), idaapi.SETMENU_APP)
+        idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", ShowBrowser.get_name(), idaapi.SETMENU_APP)
+        if hasSqlite:
+            idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", ConfigureCPURecording.get_name(), idaapi.SETMENU_APP)
+            idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", Configuretimeout.get_name(), idaapi.SETMENU_APP)
+            idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", NewAdvancedSession.get_name(), idaapi.SETMENU_APP)
+            idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", TraceThisFunction.get_name(), idaapi.SETMENU_APP)
+            idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", TraceInSession.get_name(), idaapi.SETMENU_APP)
+            idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", NewSession.get_name(), idaapi.SETMENU_APP)
+        idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", RunAPythonScript.get_name(), idaapi.SETMENU_APP)
+        idaapi.attach_action_to_menu("Edit/Plugins/MyNav/", AdvancedUtilities.get_name(), idaapi.SETMENU_APP)
+
 
 def main():
     idaapi.set_script_timeout(0)
