@@ -1,6 +1,6 @@
 ## About
 
-Forks from https://github.com/joxeankoret/mynav
+Forks from https://github.com/joxeankoret/mynav, function details can be find [here][2]
 
 MyNav is an Open Source plugin for IDA Pro which aims to help reverse engineers doing the most typical tasks.
 
@@ -13,3 +13,4 @@ The original mynav repo doesn't work with IDA 7.0,I make it work with IDA 7.0 he
 ![mynav][1]
 
 [1]: https://raw.githubusercontent.com/3xp10it/pic/master/mynav.png
+[2]: http://joxeankoret.com/blog/2010/05/02/mynav-a-python-plugin-for-ida-pro/
