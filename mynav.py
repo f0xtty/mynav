@@ -22,6 +22,7 @@ License along with this library; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 """
 
+import pdb
 import os
 import sys
 import time
@@ -130,19 +131,27 @@ class MyChoose(Choose):
         # OnSelectLine函数用来获得用户选择的内容,Show(True)时:
         # 1.只有双击具体的item时才会运行这个函数,
         # 2.选择item后单击ok按钮不会运行这个函数
-        self.deflt = n[0]  # save current selection
+        self.deflt = n  # save current selection
+        #print "OnSelectLine self.deflt is:"
+        #print self.deflt
         return (Choose.NOTHING_CHANGED, )
 
     def OnSelectionChange(self,n):
         # OnSelectionChange函数可用来在用户选择item后运行,可用于弥补上面的OnSelectLine函数的第2个缺陷
-        self.deflt = n[0]
+        self.deflt = n
+        #print "OnSelectionChange self.deflt is:"
+        #print self.deflt
+
         
 
 
     def show(self):
         # Show(True)表示单独弹出对话框窗口,Show()表示显示为内联(像functions那种)窗口
         self.Show(True)
-        return self.deflt
+        #print self.deflt
+        #pdb.set_trace()
+        chioce_index=self.deflt[0]
+        return chioce_index
 
 
 class Mn_Menu_Context(idaapi.action_handler_t):
@@ -848,11 +857,12 @@ class CMyNav():
         items = self.getSessionsList(mtype)
         chooser = MyChoose(title="Active Sessions", items=items)
         c = chooser.show()
+        #pdb.set_trace()
         c=c+1
 
         if c > 0:
             if only_first:
-                c = l[c - 1].split(":")[0]
+                c = items[c - 1].split(":")[0]
             else:
                 c = [c]
         else:
@@ -1303,7 +1313,7 @@ class CMyNav():
         c=c+1
 
         if c > 0:
-            c = l[c - 1].split(":")[0]
+            c = items[c - 1].split(":")[0]
         else:
             c = None
 
