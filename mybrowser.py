@@ -22,22 +22,25 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 """
 
 import sys
-
-#import idc
-#import idautils
-
-import idc
-import idaapi
 import idautils
 
+from idc import (choose_func, get_func_name, get_name_ea_simple, get_func_attr, get_full_flags, get_strlit_contents, get_screen_ea)
+
+from ida_bytes import (is_code, get_strlit_contents)
+
+from ida_name import (get_ea_name)
+
+
+
 try:
-    from idaapi import GraphViewer, Choose2
+    from ida_graph import GraphViewer#, Choose
+    from ida_kernwin import (Choose, jumpto, ask_long)
     hasGraphViewer = True
 except ImportError:
     hasGraphViewer = False
 
 def isFuncLib(ea):
-    if idc.GetFunctionFlags(ea) & idc.FUNC_LIB:
+    if get_func_attr(ea) & FUNC_LIB:
         return True
     elif GetName(ea).startswith("."):
         return True
@@ -45,11 +48,11 @@ def isFuncLib(ea):
         return False
 
 def GetCodeRefsFrom(ea):
-    name = idc.GetFunctionName(ea)
-    ea = idc.LocByName(name)
+    name = get_func_name(ea)
+    ea = get_name_ea_simple(name)
 
     f_start = ea
-    f_end = idc.GetFunctionAttr(ea, idc.FUNCATTR_END)
+    f_end = get_func_attr(ea, FUNCATTR_END)
 
     ret = []
     for chunk in idautils.Chunks(ea):
@@ -57,21 +60,21 @@ def GetCodeRefsFrom(ea):
         aend = chunk[1]
         for head in idautils.Heads(astart, aend):
             # If the element is an instruction
-            if idc.isCode(idc.GetFlags(head)):
+            if is_code(get_full_flags(head)):
                 refs = idautils.CodeRefsFrom(head, 0)
                 for ref in refs:
-                    loc = idc.LocByName(idc.GetFunctionName(ref))
+                    loc = get_name_ea_simple(get_func_name(ref))
                     if loc not in ret and loc != f_start:
                         ret.append(ref)
 
     return ret
 
 def GetDataXrefString(ea):
-    name = idc.GetFunctionName(ea)
-    ea = idc.LocByName(name)
+    name = get_func_name(ea)
+    ea = get_name_ea_simple(name)
 
     f_start = ea
-    f_end = idc.GetFunctionAttr(ea, idc.FUNCATTR_END)
+    f_end = get_func_attr(ea, FUNCATTR_END)
 
     ret = []
     for chunk in idautils.Chunks(ea):
@@ -79,12 +82,12 @@ def GetDataXrefString(ea):
         aend = chunk[1]
         for head in idautils.Heads(astart, aend):
             # If the element is an instruction
-            if idc.isCode(idc.GetFlags(head)):
+            if is_code(get_full_flags(head)):
                 refs = list(idautils.DataRefsFrom(head))
                 for ref in refs:
-                    s = idc.GetString(ref, -1, idc.ASCSTR_C)
+                    s = get_strlit_contents(ref, -1, STRTYPE_C)
                     if not s or len(s) <= 4:
-                        s = idc.GetString(ref, -1, idc.ASCSTR_UNICODE)
+                        s = get_strlit_contents(ref, -1, STRTYPE_C_16)
                     
                     if s:
                         if len(s) > 4:
@@ -96,9 +99,9 @@ def GetDataXrefString(ea):
         return ""
 
 def GetName(ea, resolve_imports=True):
-    name = idc.GetFunctionName(ea)
+    name = get_func_name(ea)
     if not name and resolve_imports:
-        name = idc.GetTrueName(ea)
+        name = get_ea_name(ea)
     return name
 
 def GetFunctionStartEA(ea):
@@ -109,7 +112,7 @@ def GetFunctionStartEA(ea):
 ##############################################
 """Results List Window Creator with Choose2"""
 ##############################################
-class UnsafeFunctionsChoose2(Choose2):
+class UnsafeFunctionsChoose2(Choose):
     class Item:
         def __init__(self, item):
             self.ea        = item['xref']
@@ -119,7 +122,7 @@ class UnsafeFunctionsChoose2(Choose2):
             return '%08x' % self.ea
 
     def __init__(self, title, mynav=None):
-        Choose2.__init__(self, title, [ ["Line", 8], ["Address", 10], ["Name", 30] ])
+        Choose.__init__(self, title, [ ["Line", 8], ["Address", 10], ["Name", 30] ])
         self.n = 0
         self.items = []
         self.item_relations = {}
@@ -141,7 +144,7 @@ class UnsafeFunctionsChoose2(Choose2):
 
     def OnSelectLine(self, n):
         item = self.items[int(n)]
-        idaapi.jumpto(self.item_relations[item[1]])
+        jumpto(self.item_relations[item[1]])
 
     def OnGetLine(self, n):
         return self.items[n]
@@ -172,22 +175,22 @@ class UnsafeFunctionsChoose2(Choose2):
             """ Add data entry point """
             item = self.items[int(n)]
             ea = self.item_relations[item[1]]
-            mynav.addPoint(ea, "E")
+            self.mynav.addPoint(ea, "E")
         elif cmd_id is not None and cmd_id == self.cmd_e:
             """ Add target point """
             item = self.items[int(n)]
             ea = self.item_relations[item[1]]
-            mynav.addPoint(ea, "T")
+            self.mynav.addPoint(ea, "T")
         elif cmd_id is not None and cmd_id == self.cmd_f:
             item = self.items[int(n)]
             ea = self.item_relations[item[1]]
-            mynav.removePoint(ea, "E")
+            self.mynav.removePoint(ea, "E")
         elif cmd_id is not None and cmd_id == self.cmd_g:
             item = self.items[int(n)]
             ea = self.item_relations[item[1]]
-            mynav.removePoint(ea, "E")
+            self.mynav.removePoint(ea, "E")
         else:
-            print "Unknown command:", cmd_id, "@", n
+            print ("Unknown command:", cmd_id, "@", n)
             
         return 1
 
@@ -229,62 +232,62 @@ class UnsafeFunctionsChoose2(Choose2):
         """space holder"""
         pass
 
-class SessionsManager(Choose2):
+class SessionsManager(Choose):
 
     def __init__(self, title, nb = 5, mynav=None):
-        Choose2.__init__(self, title, [ ["Session Name", 10] ])
+        Choose.__init__(self, title, [ ["Session Name", 10] ])
         self.n = 0
         self.items = []
         self.icon = 5
         self.selcount = 0
         self.mynav = mynav
-        print "created", str(self)
+        print ("created", str(self))
 
     def OnClose(self):
-        print "closed", str(self)
+        print ("closed", str(self))
 
     def OnEditLine(self, n):
         self.items[n][1] = self.items[n][1] + "*"
-        print "editing", str(n)
+        print ("editing", str(n))
 
     def OnInsertLine(self):
         self.items.append(self.make_item())
-        print "insert line"
+        print ("insert line")
 
     def OnSelectLine(self, n):
         self.selcount += 1
         Warning("[%02d] selectline '%s'" % (self.selcount, n))
 
     def OnGetLine(self, n):
-        print "getline", str(n)
+        print ("getline", str(n))
         return "kk" + str(self.items[n]) + "kk\n\n"
 
     def OnGetSize(self):
-        print "getsize"
+        print ("getsize")
         return len(self.items)
 
     def OnDeleteLine(self, n):
-        print "del ",str(n)
+        print ("del ",str(n))
         del self.items[n]
         return n
 
     def OnRefresh(self, n):
-        print "refresh", n
+        print ("refresh", n)
         return n
 
     def OnCommand(self, n, cmd_id):
         if cmd_id == self.cmd_a:
-            print "command A selected @", n
+            print ("command A selected @", n)
         elif cmd_id == self.cmd_b:
-            print "command B selected @", n
+            print ("command B selected @", n)
         else:
-            print "Unknown command:", cmd_id, "@", n
+            print ("Unknown command:", cmd_id, "@", n)
         return 1
 
     def OnGetIcon(self, n):
         r = self.items[n]
         t = self.icon + r[1].count("*")
-        print "geticon", n, t
+        print ("geticon", n, t)
         return t
 
     def show(self):
@@ -301,7 +304,7 @@ class SessionsManager(Choose2):
         self.n += 1
 
     def OnGetLineAttr(self, n):
-        print "getlineattr", n
+        print ("getlineattr", n)
         if n == 1:
             return [0xFF0000, 0]
 
@@ -380,17 +383,17 @@ class FunctionsBrowser(GraphViewer):
             self.nodes = {}
             self.totals = {}
             self.last_level = []
-            self.nodes[self.father] = self.AddNode((self.father, idc.GetFunctionName(self.father)))
+            self.nodes[self.father] = self.AddNode((self.father, get_func_name(self.father)))
             self.addChildNodes(self.father)
             
             return True
         except:
-            print "***Error, hamen", sys.exc_info()[1]
+            print ("***Error, hamen", sys.exc_info()[1])
             return True
 
     def OnGetText(self, node_id):
         ea, label = self[node_id]
-        flags = idc.GetFunctionFlags(ea)
+        flags = get_func_attr(ea)
         
         if label == "Return ...":
             color = 0xfff000
@@ -398,7 +401,7 @@ class FunctionsBrowser(GraphViewer):
         elif node_id == 0:
             color = 0x00f000
             return (label, color)
-        elif flags & idc.FUNC_LIB or flags == -1 or label.startswith("."):
+        elif flags & FUNC_LIB or flags == -1 or label.startswith("."):
             color = 0xf000f0
             return (label, color)
         else:
@@ -424,7 +427,7 @@ class FunctionsBrowser(GraphViewer):
             self.father = self.old_father
             self.Refresh()
         else:
-            idc.Jump(ea)
+            jumpto(ea)
         
         return True
 
@@ -469,24 +472,24 @@ class FunctionsBrowser(GraphViewer):
                 l = {}
                 i = 0
                 for x in self.nodes:
-                    name = idc.GetFunctionName(int(x))
+                    name = get_func_name(int(x))
                     if name and name != "":
                         l[i] = name
                         i += 1
                 for x in self.hidden:
-                    name = idc.GetFunctionName(int(x))
+                    name = get_func_name(int(x))
                     if name and name != "":
                         l[i] = name
                         i += 1
                 
-                chooser = idaapi.Choose([], "Show/Hide functions", 3)
+                chooser = Choose([], "Show/Hide functions", 3)
                 chooser.width = 50
                 chooser.list = l
                 c = chooser.choose()
                 
                 if c:
                     c = c - 1
-                    c = idc.LocByName(l[c])
+                    c = get_name_ea_simple(l[c])
                     
                     if c in self.hidden:
                         self.hidden.remove(c)
@@ -503,7 +506,7 @@ class FunctionsBrowser(GraphViewer):
                 self.show_runtime_functions = not self.show_runtime_functions
                 self.Refresh()
             elif cmd == "recursion":
-                num = idc.AskLong(self.max_level, "Maximum recursion level")
+                num = STRTYPE_C(self.max_level, "Maximum recursion level")
                 if num:
                     self.max_level = num
                     self.Refresh()
@@ -524,7 +527,7 @@ class FunctionsBrowser(GraphViewer):
                 self.mynav.saveGraph(self.father, self.max_level, self.show_runtime_functions, \
                                      self.show_string, self.hidden, self.result)
         except:
-            print "OnCommand:", sys.exc_info()[1]
+            print ("OnCommand:", sys.exc_info()[1])
         
         return True
 
@@ -548,29 +551,29 @@ class PathsBrowser(GraphViewer):
 
     def addNodes(self):
         for node in self.result:
-            name = idc.GetFunctionName(node)
+            name = get_func_name(node)
             if not name:
                 continue
             
             if name not in self.added:
                 try:
-                    self.nodes[idc.LocByName(name)] = self.AddNode((idc.LocByName(name), name))
+                    self.nodes[get_name_ea_simple(name)] = self.AddNode((get_name_ea_simple(name), name))
                     self.added.append(name)
                 except:
-                    print "Error adding node", sys.exc_info()[1]
+                    print ("Error adding node", sys.exc_info()[1])
 
     def addEdges(self):
         for ea in self.result:
             refs = GetCodeRefsFrom(ea)
             for ref in refs:
-                name = idc.GetFunctionName(ref)
-                name2 = idc.GetFunctionName(ea)
+                name = get_func_name(ref)
+                name2 = get_func_name(ea)
                 try:
                     if name in self.added:
-                        self.AddEdge(self.nodes[idc.LocByName(name2)], self.nodes[idc.LocByName(name)])
+                        self.AddEdge(self.nodes[get_name_ea_simple(name2)], self.nodes[get_name_ea_simple(name)])
                         self.added.append((ea, ref))
                 except:
-                    print "Error", sys.exc_info()[1]
+                    print ("Error", sys.exc_info()[1])
 
     def OnRefresh(self):
         self.Clear()
@@ -583,12 +586,12 @@ class PathsBrowser(GraphViewer):
     def OnGetText(self, node_id):
         try:
             ea, label = self[node_id]
-            flags = idc.GetFunctionFlags(ea)
+            flags = get_func_attr(ea)
             
             if ea in self.start or ea in self.target or ea in self.hits:
                 color = 0x00f000
                 return (label, color)
-            elif flags & idc.FUNC_LIB or flags == -1 or label.startswith("."):
+            elif flags & FUNC_LIB or flags == -1 or label.startswith("."):
                 color = 0xf000f0
                 return (label, color)
             else:
@@ -600,7 +603,7 @@ class PathsBrowser(GraphViewer):
 
     def OnDblClick(self, node_id):
         ea, label = self[node_id]
-        idc.Jump(ea)
+        jumpto(ea)
         
         return True
 
@@ -621,7 +624,7 @@ class PathsBrowser(GraphViewer):
         
         self.cmd_close = self.AddCommand("Close", "ESC")
         if self.cmd_close == 0:
-            print "Failed to add popup menu item!"
+            print ("Failed to add popup menu item!")
         
         return True
 
@@ -648,7 +651,7 @@ class StringsBrowser(GraphViewer):
         
         """print "EA", ea
         print "LABEL", label
-        flags = GetFunctionFlags(ea)
+        flags = get_func_attr(ea)
         
         if ea in self.start or ea in self.target or ea in self.hits:
             color = 0x00f000
@@ -663,7 +666,7 @@ class StringsBrowser(GraphViewer):
         ea, label, mtype = self[node_id]
         
         if ea != 0:
-            idc.Jump(ea)
+            jumpto(ea)
         return True
 
     def OnRefresh(self):
@@ -687,20 +690,20 @@ class StringsBrowser(GraphViewer):
                 
                 for addr, string in sessions[s]:
                     addr = int(addr)
-                    name = idc.GetFunctionName(addr)
+                    name = get_func_name(addr)
                     if name in self.added_names:
                         continue
                     else:
                         self.added_names.append(name)
                     
                     if not self.nodes.has_key(addr):
-                        self.nodes[addr] = self.AddNode((addr, idc.GetFunctionName(addr), 0))
+                        self.nodes[addr] = self.AddNode((addr, get_func_name(addr), 0))
                     self.AddEdge(cur_node, self.nodes[addr])
                     if not self.nodes.has_key(string):
                         self.nodes[string] = self.AddNode((addr, string, 1))
                     self.AddEdge(self.nodes[addr], self.nodes[string])
         except:
-            print "Error refresh", sys.exc_info()[1]
+            print ("Error refresh", sys.exc_info()[1])
         
         return True
 
@@ -711,23 +714,24 @@ def ShowStringsGraph(l):
 def ShowFunctionsBrowser(mea=None, show_runtime=False, show_string=True, mynav=None):
     try:
         if mea is None:
-            ea = idc.ScreenEA()
+            ea = get_screen_ea()
         else:
             ea = mea
         
-        num = idc.AskLong(3, "Maximum recursion level")
+        num = STRTYPE_C(3, "Maximum recursion level")
         if not num:
             return
         
-        result = list(idautils.CodeRefsFrom(ea, idc.BADADDR))
-        g = FunctionsBrowser("Code Refs Browser %s" % idc.GetFunctionName(ea), ea, result)
+        result = list(idautils.CodeRefsFrom(ea, BADADDR))
+        g = FunctionsBrowser("Code Refs Browser %s" % get_func_name(ea), ea, result)
         g.max_level = num
         g.show_string = True
         g.show_runtime_functions = show_runtime
         g.mynav = mynav
+        return mynav
         g.Show()
     except:
-        print "Error", sys.exc_info()[1]
+        print ("Error", sys.exc_info()[1])
 
 def ShowGraph(name, ea, funcs, hidden, level, strings, runtime, mynav):
     g = FunctionsBrowser("Saved graph: %s" % name, ea, funcs)
@@ -760,7 +764,7 @@ def SearchCodePath(start_ea, target_ea, extended = False):
             for ref in refs:
                 if ref in sea_nodes:
                     continue
-                #print "START: Function %s" % GetFunctionName(ref)
+                #print "START: Function %s" % get_func_name(ref)
                 sea_nodes.append(ref)
                 if ref == target_ea or ref in tea_nodes:
                     nodes.append(target_ea)
@@ -775,7 +779,7 @@ def SearchCodePath(start_ea, target_ea, extended = False):
                 for ref in refs:
                     if ref in tea_nodes:
                         continue
-                    #print "TARGET: Function %s" % GetFunctionName(ref)
+                    #print "TARGET: Function %s" % get_func_name(ref)
                     tea_nodes.append(ref)
                     if ref == start_ea or ref in sea_nodes:
                         nodes.append(target_ea)
@@ -788,12 +792,12 @@ def SearchCodePath(start_ea, target_ea, extended = False):
     return nodes
 
 def SearchCodePathDialog(ret_only=False, extended=False):
-    f1 = idaapi.choose_func("Select starting function", 0)
+    f1 = choose_func("Select starting function", 0)
     if not f1:
         return
     sea = f1.startEA
     
-    f2 = idaapi.choose_func("Select target function", idc.ScreenEA())
+    f2 = choose_func("Select target function", get_screen_ea())
     if not f2:
         return
     tea = f2.startEA
@@ -803,21 +807,21 @@ def SearchCodePathDialog(ret_only=False, extended=False):
         if ret_only:
             return nodes
         else:
-            g = PathsBrowser("Code paths from %s to %s" % (idc.GetFunctionName(sea),
-                                                           idc.GetFunctionName(tea)),
+            g = PathsBrowser("Code paths from %s to %s" % (get_func_name(sea),
+                                                           get_func_name(tea)),
                                                            nodes, sea, tea)
             g.Show()
     else:
-        idaapi.info("No codepath found between %s and %s" % (idc.GetFunctionName(sea), idc.GetFunctionName(tea)))
+        info("No codepath found between %s and %s" % (get_func_name(sea), get_func_name(tea)))
         return nodes
 
-def main():
+def PLUGIN_ENTRY():
     #ShowFunctionsBrowser(show_runtime=True)
     try:
         #SearchCodePathDialog()
-        ShowFunctionsBrowser(show_string=True)
+        return ShowFunctionsBrowser(show_string=True)
     except:
-        print "***Error:", sys.exc_info()[1]
+        print ("***Error:", sys.exc_info()[1])
 
 if __name__ == "__main__":
-    main()
+    PLUGIN_ENTRY()
