@@ -22,30 +22,61 @@ License along with this library; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 """
 
-import pdb
-import os
+import imp
 import sys
 import time
 import random
 import idaapi
+
+# debugger event codes
+NOTASK         = -2         # process does not exist
+DBG_ERROR      = -1         # error (e.g. network problems)
+DBG_TIMEOUT    = 0          # timeout
+PROCESS_START  = 0x00000001 # New process started
+PROCESS_EXIT   = 0x00000002 # Process stopped
+THREAD_START   = 0x00000004 # New thread started
+THREAD_EXIT    = 0x00000008 # Thread stopped
+BREAKPOINT     = 0x00000010 # Breakpoint reached
+STEP           = 0x00000020 # One instruction executed
+EXCEPTION      = 0x00000040 # Exception
+LIBRARY_LOAD   = 0x00000080 # New library loaded
+LIBRARY_UNLOAD = 0x00000100 # Library unloaded
+INFORMATION    = 0x00000200 # User-defined information
+SYSCALL        = 0x00000400 # Syscall (not used yet)
+WINMESSAGE     = 0x00000800 # Window message (not used yet)
+PROCESS_ATTACH = 0x00001000 # Attached to running process
+PROCESS_DETACH = 0x00002000 # Detached from process
+PROCESS_SUSPEND = 0x00004000 # Process has been suspended
+
 try:
     import sqlite3
     hasSqlite = True
 except ImportError:
     hasSqlite = False
-    print "Warning! Your python version lacks SQLite support!"
+    print ("Warning! Your python version lacks SQLite support!")
 
-from idc import (GetBptQty, GetBptEA, GetRegValue, FindText, NextAddr, GetDisasm, GetMnem,
-                 GetFunctionName, MakeFunction, ItemSize, GetBptAttr, AskFile, StopDebugger)
-from idaapi import (askyn_c, asklong, get_func, info, get_dbg_byte, get_idp_name,
-                    DBG_Hooks, run_requests, request_run_to, showAuto, find_not_func,
+from idc import (get_bpt_qty, get_bpt_ea, get_reg_value, find_text, next_addr, generate_disasm_line, print_insn_mnem, set_bpt_attr, get_event_ea, get_segm_start, get_segm_end, create_insn, get_event_exc_code,
+                 get_func_name, add_func, get_item_size, get_bpt_attr, exit_process, get_func_attr, get_screen_ea, add_bpt, get_strlit_contents, set_color, plan_and_wait)
+from idaapi import (get_func, info, get_dbg_byte, get_idp_name,
+                    DBG_Hooks, run_requests, request_run_to, find_not_func,
                     get_func, msg)
 
-from ida_kernwin import Choose
+from ida_kernwin import (Choose, ask_file, ask_long, ask_yn, ask_str, jumpto)
+
+from ida_auto import (show_auto)
+
+from ida_dbg import (del_bpt, enable_bpt, start_process, wait_for_next_event, get_process_state, dbg_can_query)
+
+from ida_nalt import (get_input_file_path)
+
+from ida_ida import (inf_get_min_ea, inf_get_max_ea)
 
 try:
-    from idaapi import GraphViewer
+    #from idaapi import GraphViewer
+    from ida_graph import GraphViewer
+    #GraphViewer = False
     import mybrowser
+    mybrowser.PLUGIN_ENTRY
     hasGraphViewer = True
 except ImportError:
     hasGraphViewer = False
@@ -58,8 +89,8 @@ VERSION = 0x01020200
 COLORS = [0xfff000, 0x95AFCD, 0x4FFF4F, 0xc0ffff,
           0xffffc0, 0xc0cfff, 0xc0ffcf, 0x95AFFD]
 
-reload(sys)
-sys.setdefaultencoding('utf8')
+imp.reload(sys)
+#sys.setdefaultencoding('utf8')
 
 
 def mynav_print(amsg):
@@ -80,22 +111,22 @@ class FunctionsGraph(GraphViewer):
             for hit in self.result:
                 if not hit in dones:
                     ea = int(hit[0])
-                    name = GetFunctionName(ea)
+                    name = get_func_name(ea)
                     self.nodes[ea] = self.AddNode((ea, name))
 
             for n1 in self.nodes:
-                l1 = map(GetFunctionName, list(CodeRefsTo(n1, 1)))
-                l2 = map(GetFunctionName, list(DataRefsTo(n1)))
+                l1 = map(get_func_name, list(CodeRefsTo(n1, 1)))
+                l2 = map(get_func_name, list(DataRefsTo(n1)))
 
                 for n2 in self.nodes:
                     if n1 != n2:
-                        name = GetFunctionName(n2)
+                        name = get_func_name(n2)
                         if name in l1 or name in l2:
                             self.AddEdge(self.nodes[n2], self.nodes[n1])
 
             return True
         except:
-            print "***Error", sys.exc_info()[1]
+            print ("***Error", sys.exc_info()[1])
 
     def OnGetText(self, node_id):
         ea, label = self[node_id]
@@ -103,7 +134,7 @@ class FunctionsGraph(GraphViewer):
 
     def OnDblClick(self, node_id):
         ea, label = self[node_id]
-        Jump(ea)
+        jumpto(ea)
 
         return True
 
@@ -190,7 +221,7 @@ class Mn_Menu_Context(idaapi.action_handler_t):
     @classmethod
     def update(self, ctx):
         try:
-            if ctx.form_type == idaapi.BWN_DISASM:
+            if ctx.widget_type == idaapi.BWN_DISASM:
                 return idaapi.AST_ENABLE_FOR_FORM
             else:
                 return idaapi.AST_DISABLE_FOR_FORM
@@ -506,11 +537,11 @@ class CMyNav():
         """ Connect to the SQLite database and create the schema if needed """
 
         try:
-            self.filename = "%s.sqlite" % GetInputFilePath()
+            self.filename = "%s.sqlite" % get_input_file_path()
             self.db = sqlite3.connect(
                 self.filename, check_same_thread=False, isolation_level=None)
         except:
-            self.filename = idc.AskFile(
+            self.filename = ask_file(
                 1, "*.sqlite", "Select an existing or new SQLite database")
 
             if self.filename is not None:
@@ -587,28 +618,28 @@ class CMyNav():
         self.db.commit()
         return True
 
-    def addPoint(self, ea, strtype):
-        """ Add the function ea as point. strtype can be either 'E' for entry point or 'T' for target point """
-        new_ea = GetFunctionAttr(ea, FUNCATTR_START)
+    def addPoint(self, ea, STRTYPE_C):
+        """ Add the function ea as point. STRTYPE_C can be either 'E' for entry point or 'T' for target point """
+        new_ea = get_func_attr(ea, FUNCATTR_START)
         if not new_ea:
             new_ea = ea
 
         cur = self.db.cursor()
         sql = """ insert into points (func_addr, type) values (?, ?) """
-        cur.execute(sql, (new_ea, strtype))
+        cur.execute(sql, (new_ea, STRTYPE_C))
         self.db.commit()
         cur.close()
 
         return True
 
-    def removePoint(self, ea, strtype):
-        """ Remove the function ea as point. strtype can be either 'E' for entry point or 'T' for target point """
-        new_ea = GetFunctionAttr(ea, FUNCATTR_START)
+    def removePoint(self, ea, STRTYPE_C):
+        """ Remove the function ea as point. STRTYPE_C can be either 'E' for entry point or 'T' for target point """
+        new_ea = get_func_attr(ea, FUNCATTR_START)
         if not new_ea:
             new_ea = ea
         cur = self.db.cursor()
         sql = """ delete from points where func_addr = ? and type = ? """
-        cur.execute(sql, (new_ea, strtype))
+        cur.execute(sql, (new_ea, STRTYPE_C))
         self.db.commit()
         cur.close()
 
@@ -632,25 +663,25 @@ class CMyNav():
 
     def addCurrentAsDataEntryPoint(self):
         """ Add current function as entry point """
-        self.addDataEntryPoint(ScreenEA())
+        self.addDataEntryPoint(get_screen_ea())
 
     def addCurrentAsTargetPoint(self):
         """ Add current function as target point """
-        self.addTargetPoint(ScreenEA())
+        self.addTargetPoint(get_screen_ea())
 
     def removeCurrentDataEntryPoint(self):
         """ Remove current entry point """
-        self.removeDataEntryPoint(ScreenEA())
+        self.removeDataEntryPoint(get_screen_ea())
 
     def removeCurrentTargetPoint(self):
         """ Remove current target point """
-        self.removeTargetPoint(ScreenEA())
+        self.removeTargetPoint(get_screen_ea())
 
     def getAllPointsList(self):
         """ Return a list with all entry and target points """
         cur = self.db.cursor()
         sql = """ select func_addr from points """
-        cur.execute(sql, (strtype, ))
+        cur.execute(sql, (STRTYPE_C, ))
 
         l = []
         for row in cur.fetchall():
@@ -659,11 +690,11 @@ class CMyNav():
 
         return l
 
-    def getPointsList(self, strtype):
-        """ Return a list with all either entry or target points. strtype can be either 'E' or 'T' """
+    def getPointsList(self, STRTYPE_C):
+        """ Return a list with all either entry or target points. STRTYPE_C can be either 'E' or 'T' """
         cur = self.db.cursor()
         sql = """ select func_addr from points where type = ? """
-        cur.execute(sql, (strtype, ))
+        cur.execute(sql, (STRTYPE_C, ))
 
         l = []
         for row in cur.fetchall():
@@ -680,11 +711,11 @@ class CMyNav():
         l = self.getPointsList('T')
         return l
 
-    def getPoint(self, strtype, p):
+    def getPoint(self, STRTYPE_C, p):
         """ Read from database an specific point """
         cur = self.db.cursor()
         sql = """ select 1 from points where type = ? and func_addr = ?"""
-        cur.execute(sql, (strtype, p))
+        cur.execute(sql, (STRTYPE_C, p))
 
         l = []
         for row in cur.fetchall():
@@ -694,7 +725,7 @@ class CMyNav():
         return l
 
     def addRemoveTargetPoint(self):
-        ea = GetFunctionAttr(ScreenEA(), FUNCATTR_START)
+        ea = get_func_attr(get_screen_ea(), FUNCATTR_START)
         if self.getPoint("T", ea):
             self.removeCurrentTargetPoint()
             mynav_print("Target point 0x%08x removed" % ea)
@@ -703,7 +734,7 @@ class CMyNav():
             mynav_print("Target point 0x%08x added" % ea)
 
     def addRemoveEntryPoint(self):
-        ea = GetFunctionAttr(ScreenEA(), FUNCATTR_START)
+        ea = get_func_attr(get_screen_ea(), FUNCATTR_START)
         if self.getPoint("E", ea):
             self.removeCurrentDataEntryPoint()
             mynav_print("Data entry point 0x%08x removed" % ea)
@@ -801,7 +832,7 @@ class CMyNav():
         if l:
             for p in l:
                 for x in p:
-                    DelBpt(p)
+                    del_bpt(p)
 
     def selectDataEntryPoints(self):
         eps = self.getDataEntryPointsList()
@@ -811,7 +842,7 @@ class CMyNav():
     def deselectDataEntryPoints(self):
         eps = self.getDataEntryPointsList()
         for p in eps:
-            DelBpt(p)
+            del_bpt(p)
 
     def tracePoints(self):
         self.preserveBreakpoints()
@@ -827,7 +858,7 @@ class CMyNav():
     def deselectTargetPoints(self):
         tps = self.getTargetPointsList()
         for p in tps:
-            DelBpt(p)
+            del_bpt(p)
 
     def getSessionsList(self, mtype=0, all=False):
         if not all:
@@ -883,7 +914,7 @@ class CMyNav():
                 for hit in self.current_session:
                     ea = int(hit[0])
                     tmp_item = {}
-                    tmp_item["func_name"] = GetFunctionName(ea)
+                    tmp_item["func_name"] = get_func_name(ea)
                     tmp_item["xref"] = ea
 
                     if tmp_item not in results:
@@ -916,7 +947,7 @@ class CMyNav():
     def showGraph(self, id=None, name=None):
         """ Show a graph for one specific recorded session """
         if not hasGraphViewer:
-            print "No GraphViewer support :("
+            print ("No GraphViewer support :(")
             return
 
         if id is not None:
@@ -938,13 +969,13 @@ class CMyNav():
         else:
             save_cpu = False
 
-        DelBpt(int(f))
-        AddBpt(int(f))
+        del_bpt(int(f))
+        add_bpt(int(f))
 
         if not save_cpu:
-            SetBptAttr(f, BPTATTR_FLAGS, BPT_TRACE)
+            set_bpt_attr(f, BPTATTR_FLAGS, BPT_TRACE)
 
-        EnableBpt(int(f), 1)
+        enable_bpt(int(f), 1)
 
     def setBreakpoints(self, trace=True):
         """ Set a breakpoint in every function """
@@ -968,10 +999,10 @@ class CMyNav():
         mynav_print("Removing breakpoints. Please, wait...")
         i = 0
         while 1:
-            ea = GetBptEA(i)
+            ea = get_bpt_ea(i)
             if ea == BADADDR:
                 break
-            DelBpt(ea)
+            del_bpt(ea)
         mynav_print("Done")
 
     def getRegisters(self):
@@ -981,7 +1012,7 @@ class CMyNav():
             for x in idaapi.dbg_get_registers():
                 name = x[0]
                 try:
-                    addr = idc.GetRegValue(name)
+                    addr = get_reg_value(name)
                 except:
                     break
 
@@ -995,17 +1026,17 @@ class CMyNav():
                     bytes = None"""
 
                 try:
-                    strdata = GetString(int(addr), -1, ASCSTR_C)
+                    strdata = get_strlit_contents(int(addr), -1, STRTYPE_C)
                 except:
                     try:
                         strdata = "Unicode: " + \
-                            GetString(int(addr), -1, ASCSTR_UNICODE)
+                            get_strlit_contents(int(addr), -1, STRTYPE_C_16)
                     except:
                         strdata = None
 
                 l.append([name, addr, bytes, strdata])
         except:
-            print "getRegisters()", sys.exc_info()[1]
+            print ("getRegisters()", sys.exc_info()[1])
 
         return l
 
@@ -1018,30 +1049,30 @@ class CMyNav():
             if self.save_cpu:
                 self.current_session_cpu.append(self.getRegisters())
 
-            self._debug("Hit %s:%08x" % (GetFunctionName(pc), pc))
+            self._debug("Hit %s:%08x" % (get_func_name(pc), pc))
             if self.step_mode:
-                SetColor(pc, 1, self.current_color)
+                set_color(pc, 1, self.current_color)
 
             """if not all:
-                DelBpt(pc)"""
-            DelBpt(pc)
+                del_bpt(pc)"""
+            del_bpt(pc)
             """
             if self.endRecording(pc):
                 mynav_print("Session's endpoint reached")
             """
         except:
-            print "recordBreakpoint:", sys.exc_info()[1]
+            print ("recordBreakpoint:", sys.exc_info()[1])
 
     def stop(self):
-        StopDebugger()
+        exit_process()
 
     def startRecording(self, all=False):
         """ Start recording breakpoint hits """
-        """if not dbg_can_query():
+        if not dbg_can_query():
             info("Select a debugger first!")
-            return False"""
+            return False
 
-        StartDebugger(self.dbg_path, self.dbg_arguments, self.dbg_directory)
+        start_process(self.dbg_path, self.dbg_arguments, self.dbg_directory)
 
         t = time.time()
         if self.timeout != 0:
@@ -1052,39 +1083,40 @@ class CMyNav():
 
         while 1:
             # WFNE_CONT|WFNE_SUSP
-            code = GetDebuggerEvent(WFNE_ANY | WFNE_CONT | WFNE_SUSP, mtimeout)
+            code = wait_for_next_event(WFNE_ANY | WFNE_CONT | WFNE_SUSP, mtimeout)
+
 
             if code == BREAKPOINT or code == STEP and last != BREAKPOINT:
-                pc = GetEventEa()
+                pc = get_event_ea()
                 t2 = time.time()
                 self.current_session.append([pc, t2])
                 if self.save_cpu:
                     self.current_session_cpu.append(self.getRegisters())
-                self._debug("Hit %s:%08x" % (GetFunctionName(pc), pc))
+                self._debug("Hit %s:%08x" % (get_func_name(pc), pc))
                 if self.step_mode:
-                    SetColor(pc, 1, self.current_color)
+                    set_color(pc, 1, self.current_color)
 
                 if not all:
-                    DelBpt(pc)
+                    del_bpt(pc)
                 if self.endRecording(pc):
                     mynav_print("Session's endpoint reached")
                     break
             elif code == INFORMATION:
                 # print "INFORMATION"
                 pass
-            elif GetProcessState() != DSTATE_RUN:
-                if GetEventExceptionCode() != 0 and self.on_exception is not None:
-                    self.on_exception(GetEventEa(), GetEventExceptionCode())
+            elif get_process_state() != DSTATE_RUN:
+                if get_event_exc_code() != 0 and self.on_exception is not None:
+                    self.on_exception(get_event_ea(), get_event_exc_code())
                 break
             elif code in [EXCEPTION, 0x40]:
-                # print "**EXCEPTION", hex(GetEventEa()),
-                # hex(GetEventExceptionCode())
+                # print "**EXCEPTION", hex(get_event_ea()),
+                # hex(get_event_exc_code())
                 if self.on_exception is not None:
-                    self.on_exception(GetEventEa(), GetEventExceptionCode())
+                    self.on_exception(get_event_ea(), get_event_exc_code())
             elif code not in [DBG_TIMEOUT, PROCESS_START, PROCESS_EXIT, THREAD_START,
                               THREAD_EXIT, LIBRARY_LOAD, LIBRARY_UNLOAD, PROCESS_ATTACH,
                               PROCESS_DETACH, STEP]:
-                print "DEBUGGER: Code 0x%08x" % code
+                print ("DEBUGGER: Code 0x%08x" % code)
 
             last = code
             if time.time() - t > self.timeout and self.timeout != 0:
@@ -1109,20 +1141,20 @@ class CMyNav():
 
     def getPC(self):
         try:
-            pc = GetEventEa()
+            pc = get_event_ea()
             return pc
         except:
-            print "getPc", sys.exc_info()[1]
+            print ("getPc", sys.exc_info()[1])
 
     def start(self, do_show=True, session_name=None):
         if session_name is None:
-            name = AskStr(self.default_name, "Enter new session name")
+            name = ask_str(self.default_name, 0, "Enter new session name")
         else:
             name = session_name
 
         if name:
-            if GetBptEA(0) == BADADDR:
-                res = AskYN(
+            if get_bpt_ea(0) == BADADDR:
+                res = ask_yn(
                     1, "There is no breakpoint set. Do you want to set breakpoints in all functions?")
                 if res == 1:
                     self.setBreakpoints()
@@ -1147,8 +1179,8 @@ class CMyNav():
             try:
                 mynav_print("Starting debugger ...")
                 self.startRecording()
-            except:
-                print sys.exc_info()[1]
+            except :
+                print (sys.exc_info()[1])
                 mynav_print("Cancelled by user")
 
             mynav_print("Saving current session ...")
@@ -1157,7 +1189,7 @@ class CMyNav():
                 id = self.saveCurrentSession(name)
                 if not self.step_mode and do_show:
                     if len(self.current_session) > 100:
-                        if askyn_c(1, "There are %d node(s), it will take a long while to show the graph. Do you want to show it?" % len(self.current_session)) == 1:
+                        if ask_yn(1, "There are %d node(s), it will take a long while to show the graph. Do you want to show it?" % len(self.current_session)) == 1:
                             self.showGraph()
                     else:
                         self.showGraph()
@@ -1175,7 +1207,7 @@ class CMyNav():
         self.start()
 
     def clearSessions(self):
-        if AskYN(0, "Are you sure to delete *ALL* saved sessions?") == 1:
+        if ask_yn(0, "Are you sure to delete *ALL* saved sessions?") == 1:
             cur = self.db.cursor()
             cur.execute("delete from records")
             cur.execute("delete from record_data")
@@ -1217,14 +1249,14 @@ class CMyNav():
                 self.loadSession(c)
                 # self.setBreakpoints()
                 for addr in self.current_session:
-                    DelBpt(int(addr[0]))
+                    del_bpt(int(addr[0]))
                 mynav_print("Done unloading " + str(c))
 
     def preserveBreakpoints(self):
         self.temporary_breakpoints = []
         i = 0
         while 1:
-            ea = GetBptEA(i)
+            ea = get_bpt_ea(i)
             if ea == BADADDR:
                 break
             self.temporary_breakpoints.append(ea)
@@ -1261,7 +1293,7 @@ class CMyNav():
             for c in l:
                 self.loadSession(c)
                 for addr in self.current_session:
-                    SetColor(int(addr[0]), 1, 0xFFFFFFFF)
+                    set_color(int(addr[0]), 1, 0xFFFFFFFF)
 
     def showTraceSession(self):
         c = self.showSessions(mtype=1)
@@ -1269,7 +1301,7 @@ class CMyNav():
             self.loadSession(c)
             self.current_color = random.choice(COLORS)
             for addr in self.current_session:
-                SetColor(int(addr[0]), 1, self.current_color)
+                set_color(int(addr[0]), 1, self.current_color)
 
     def showSimplifiedTraceSession(self):
         pass
@@ -1280,7 +1312,7 @@ class CMyNav():
     def traceInFunction(self):
         self.step_mode = True
         self.current_color = random.choice(COLORS)
-        ea = ScreenEA()
+        ea = get_screen_ea()
         self.step_functions = [ea]
         self.preserveBreakpoints()
         self.clearBreakpoints()
@@ -1388,7 +1420,7 @@ class CMyNav():
 
     def selectFunctionChilds(self, badd=True):
         self.done_functions = []
-        self.addChildsBpt(ScreenEA(), badd)
+        self.addChildsBpt(get_screen_ea(), badd)
         if badd:
             mynav_print("Added a total of %d breakpoints" %
                         len(self.done_functions))
@@ -1398,12 +1430,12 @@ class CMyNav():
         if not ea in self.done_functions:
             if badd:
                 mynav_print("Adding breakpoint at 0x%08x:%s" %
-                            (ea, GetFunctionName(ea)))
+                            (ea, get_func_name(ea)))
             self.done_functions.append(ea)
             if badd:
                 self.addBreakpoint(ea)
             else:
-                DelBpt(ea)
+                del_bpt(ea)
 
         refs = mybrowser.GetCodeRefsFrom(ea)
         for ref in refs:
@@ -1412,10 +1444,10 @@ class CMyNav():
             self.done_functions.append(ref)
             if badd:
                 mynav_print("Adding breakpoint at 0x%08x:%s" %
-                            (ref, GetFunctionName(ref)))
+                            (ref, get_func_name(ref)))
                 self.addBreakpoint(ref)
             else:
-                DelBpt(ref)
+                del_bpt(ref)
 
             self.addChildsBpt(ref, badd)
 
@@ -1425,7 +1457,7 @@ class CMyNav():
             if len(nodes) > 0:
                 for node in nodes:
                     mynav_print("Adding breakpoint at 0x%08x:%s" %
-                                (node, GetFunctionName(node)))
+                                (node, get_func_name(node)))
                     self.addBreakpoint(node)
                 return True
         return False
@@ -1440,7 +1472,7 @@ class CMyNav():
         nodes = mybrowser.mybrowser.SearchCodePathDialog(ret_only=True)
         if len(nodes) > 0:
             for node in nodes:
-                DelBpt(node)
+                del_bpt(node)
 
     def selectExtendedCodePaths(self):
         nodes = mybrowser.mybrowser.SearchCodePathDialog(
@@ -1448,7 +1480,7 @@ class CMyNav():
         if len(nodes) > 0:
             for node in nodes:
                 mynav_print("Adding breakpoint at 0x%08x:%s" %
-                            (node, GetFunctionName(node)))
+                            (node, get_func_name(node)))
                 self.addBreakpoint(node)
 
     def deselectExtendedCodePaths(self):
@@ -1456,22 +1488,22 @@ class CMyNav():
             ret_only=True, extended=True)
         if len(nodes) > 0:
             for node in nodes:
-                DelBpt(node)
+                del_bpt(node)
 
     def configureTimeout(self):
         val = self.readSetting("timeout")
         if val is None:
             val = 0
 
-        val = asklong(int(val), "Timeout for the session")
+        val = ask_long(int(val), "Timeout for the session")
         if val is not None:
             self.saveSetting("timeout", val)
 
     def propagateBreakpointChanges(self):
-        count = GetBptQty()
+        count = get_bpt_qty()
         for i in range(0, count):
-            f = GetBptEA(i)
-            DelBpt(f)
+            f = get_bpt_ea(i)
+            del_bpt(f)
             self.addBreakpoint(f)
         mynav_print("Changes applied")
 
@@ -1484,23 +1516,23 @@ class CMyNav():
             val = int(val)
 
         if val == 1:
-            val = askyn_c(1, "Do you want to *DISABLE* CPU recording?")
+            val = ask_yn(1, "Do you want to *DISABLE* CPU recording?")
             if val == 1:
                 self.saveSetting("save_cpu", 0)
                 changed = True
         else:
-            val = askyn_c(1, "Do you want to *ENABLE* CPU recording?")
+            val = ask_yn(1, "Do you want to *ENABLE* CPU recording?")
             if val == 1:
                 self.saveSetting("save_cpu", 1)
                 changed = True
 
         if changed:
-            if askyn_c(1, "Do you want to apply changes to the currently set breakpoints?"):
+            if ask_yn(1, "Do you want to apply changes to the currently set breakpoints?"):
                 self.propagateBreakpointChanges()
 
     def showSegmentsGraph(self):
-        ea = ScreenEA()
-        l = list(Functions(SegStart(ea), SegEnd(ea)))
+        ea = get_screen_ea()
+        l = list(Functions(get_segm_start(ea), get_segm_end(ea)))
 
         if len(l) > 0:
             g = mybrowser.PathsBrowser(
@@ -1511,9 +1543,9 @@ class CMyNav():
 
     def showBreakpointsGraph(self):
         l = []
-        count = GetBptQty()
+        count = get_bpt_qty()
         for i in range(0, count):
-            l.append(GetBptEA(i))
+            l.append(get_bpt_ea(i))
 
         if len(l) > 0:
             g = mybrowser.PathsBrowser("Breakpoints graph", l, [], [])
@@ -1522,13 +1554,13 @@ class CMyNav():
             info("No breakpoint set!")
 
     def doDiscoverFunctions(self):
-        ea = ScreenEA()
+        ea = get_screen_ea()
         old_ea = ea
-        start_ea = SegStart(ea)
+        start_ea = get_segm_start(ea)
         # print "Start at 0x%08x" % start_ea
-        end_ea = SegEnd(ea)
+        end_ea = get_segm_end(ea)
         # print "End at 0x%08x" % end_ea
-        #ea2 = MaxEA()
+        #ea2 = inf_get_max_ea()
         t = time.time()
         val = 1000
 
@@ -1538,11 +1570,11 @@ class CMyNav():
             val = min(1000, end_ea - ea)
             #ea = find_not_func(tmp, 0)
             # if ea == BADADDR:
-            ea = FindText(tmp, SEARCH_REGEX | SEARCH_DOWN, val, 0,
+            ea = find_text(tmp, SEARCH_REGEX | SEARCH_DOWN, val, 0,
                           "# End of| endp|align |END OF FUNCTION")
-            showAuto(ea)
+            show_auto(ea)
             if time.time() - t > 60 and not asked:
-                val = askyn_c(
+                val = ask_yn(
                     1, "The process is taking too long. Do you want to continue?")
                 asked = True
                 if val is None:
@@ -1553,29 +1585,29 @@ class CMyNav():
                     t = time.time()
 
             if ea != BADADDR and ea < end_ea:
-                showAuto(ea)
-                ea += ItemSize(ea)
+                show_auto(ea)
+                ea += get_item_size(ea)
 
                 if ea != BADADDR and ea < end_ea:
-                    txt = GetDisasm(ea)
+                    txt = generate_disasm_line(ea)
 
                     if txt.startswith("align ") or txt.startswith("db ") or txt.endswith(" endp") \
                        or txt.find("END OF FUNCTION") > -1:
-                        ea = ea + ItemSize(ea)
+                        ea = ea + get_item_size(ea)
 
                     if ea < end_ea:
-                        if GetFunctionName(ea) == "":
+                        if get_func_name(ea) == "":
                             mynav_print("Creating function at 0x%08x" % ea)
-                            MakeCode(ea)
-                            MakeFunction(ea, BADADDR)
+                            create_insn(ea)
+                            add_func(ea, BADADDR)
             else:
                 break
         return True
 
     def realDoDiscoverFunctions(self):
-        ea = ScreenEA()
-        start_ea = SegStart(ea)
-        end_ea = SegEnd(ea)
+        ea = get_screen_ea()
+        start_ea = get_segm_start(ea)
+        end_ea = get_segm_end(ea)
         total = len(list(Functions(start_ea, end_ea)))
         times = 0
         while times <= 5:
@@ -1613,7 +1645,7 @@ class CMyNav():
         return l
 
     def searchStringInSessions(self, id=None):
-        txt = AskStr("String to search", "")
+        txt = ask_str("String to search", 0, "")
         if txt is not None:
             #id = self.showSessions()
             id = None
@@ -1669,21 +1701,21 @@ class CMyNav():
             "%s (Functions List)" % self.current_name, self)
         results = self.getSessionsList()
         for item in results:
-            print "Adding item", item
+            print ("Adding item", item)
             ch2.add_item(item)
 
         r = ch2.show()
 
     def selectFunctionsInSegment(self):
-        ea = ScreenEA()
-        for f in list(Functions(SegStart(ea), SegEnd(ea))):
+        ea = get_screen_ea()
+        for f in list(Functions(get_segm_start(ea), get_segm_end(ea))):
             self.addBreakpoint(f)
         mynav_print("Done")
 
     def deselectFunctionsInSegment(self):
-        ea = ScreenEA()
-        for f in list(Functions(SegStart(ea), SegEnd(ea))):
-            DelBpt(f)
+        ea = get_screen_ea()
+        for f in list(Functions(get_segm_start(ea), get_segm_end(ea))):
+            del_bpt(f)
         mynav_print("Done")
 
     def selectAdvanced(self):
@@ -1746,38 +1778,39 @@ class CMyNav():
             elif c == 3:
                 msg = "WARNING! This process can discover a lot of function names but it may generate incorrect results too.\n"
                 msg += "Do you want to continue?"
-                if askyn_c(1, msg) == 1:
+                if ask_yn(1, msg) == 1:
                     x = myexport.CFunctionsMatcher()
                     x.doImport()
             elif c == 4:
                 msg = "WARNING! This process can discover a lot of new functions but it may generate incorrect results.\n"
                 msg += "Do you want to continue?"
-                if askyn_c(1, msg) == 1:
+                if ask_yn(1, msg) == 1:
                     self.realDoDiscoverFunctions()
             elif c == 5:
-                AnalyzeArea(SegStart(here()), SegEnd(here()))
+                plan_and_wait(get_segm_start(here()), get_segm_end(here()))
             elif c == 6:
-                AnalyzeArea(MinEA(), MaxEA())
+                plan_and_wait(inf_get_min_ea(), inf_get_max_ea())
             elif c == 7:
-                AnalyzeArea(SegStart(here()), SegEnd(here()))
+                plan_and_wait(get_segm_start(here()), get_segm_end(here()))
                 msg = "WARNING! This process can discover a lot of new functions but it may generate incorrect results.\n"
                 msg += "Do you want to continue?"
-                if askyn_c(1, msg) == 1:
+                if ask_yn(1, msg) == 1:
                     self.realDoDiscoverFunctions()
-                AnalyzeArea(SegStart(here()), SegEnd(here()))
+                plan_and_wait(get_segm_start(here()), get_segm_end(here()))
         else:
             c = None
 
         return c
 
     def runScript(self):
-        res = AskFile(0, "*.py", "Select python script to run")
+        res = ask_file(0, "*.py", "Select python script to run")
         if res is not None:
             g = globals()
             g["mynav"] = self
             g["mybrowser"] = mybrowser
             g["myexport"] = myexport
-            execfile(res, g)
+            #execfile(res, g)
+            exec(open("./filename").read(), g)
 
     def mynav_print(self, msg):
         mynav_print(msg)
@@ -1881,11 +1914,11 @@ class CMyNav():
             "Edit/Plugins/MyNav/", AdvancedUtilities.get_name(), idaapi.SETMENU_APP)
 
 
-def main():
+def PLUGIN_ENTRY():
     idaapi.set_script_timeout(0)
     nav = CMyNav()
     """
-    if askyn_c(1, "Set breakpoints?") == 1:
+    if ask_yn(1, "Set breakpoints?") == 1:
         nav.setBreakpoints()
 
     nav.start()
@@ -1900,6 +1933,6 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        PLUGIN_ENTRY()
     except:
-        print "***Error, main", sys.exc_info()[1]
+        print ("***Error, main", sys.exc_info()[1])
