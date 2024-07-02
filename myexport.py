@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 
 """
 MyNav, a tool 'similar' to BinNavi
@@ -21,807 +21,311 @@ License along with this library; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 """
 
+# ------------------------------------------------
+# Standard imports
+import os
 import sys
-import idautils
-
-from idc import (choose_func, get_func_name, get_name_ea_simple, get_func_attr, get_full_flags, get_strlit_contents, get_screen_ea)
-
-from ida_bytes import (is_code, get_strlit_contents)
-
-from ida_name import (get_ea_name)
-
-
+import traceback
 
 try:
-    from ida_graph import GraphViewer#, Choose
-    from ida_kernwin import (Choose, jumpto, ask_long)
-    hasGraphViewer = True
+    import sqlite3
+    hasSqlite = True
 except ImportError:
-    hasGraphViewer = False
+    hasSqlite = False
 
-def isFuncLib(ea):
-    if get_func_attr(ea) & FUNC_LIB:
+# ------------------------------------------------
+# IDA's imports
+import idautils
+
+from ida_kernwin import (ask_yn, ask_file)
+
+from idc import (set_name, get_segm_start, get_segm_end, get_func_attr, get_func_name, print_insn_mnem, get_type, set_cmt)
+
+# ------------------------------------------------
+# Helper
+def myexport_print(msg):
+    print ("[+] %s" % msg)
+
+# ------------------------------------------------
+# Symbol's exporter class
+class CFunctionsMatcher(object):
+    def __init__(self):
+        self.initialize()
+
+    def __del__(self):
+        if self.db:
+            self.closeDatabase()
+
+    def initialize(self):
+        self.functions = {}
+        self.filename = None
+        self.db = None
+        self.start_ea = None
+        self.end_ea = None
+
+    def closeDatabase(self):
+        self.db.close()
+        self.db = None
+
+    def createSchema(self):
+        cur = self.db.cursor()
+        sql = """ create table if not exists functions (
+                        id integer primary key,
+                        name varchar(50),
+                        processor varchar(50),
+                        nodes integer,
+                        edges integer,
+                        points integer,
+                        size integer,
+                        instructions integer,
+                        mnemonics text,
+                        prototype text) """
+        cur.execute(sql)
+        self.db.commit()
+        cur.close()
+        
         return True
-    elif GetName(ea).startswith("."):
+
+    def openDatabase(self, filename):
+        self.db = sqlite3.connect(filename)
+
+    def createDatabase(self, filename):
+        self.openDatabase(filename)
+        self.createSchema()
+
+    def saveDatabase(self):
+        cur = self.db.cursor()
+        sql = """insert into functions (name, processor, nodes, edges, points, size, instructions, mnemonics, prototype)
+                                values (?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        
+        for row in self.functions:
+            name, nodes, edges, points, size, instructions, mnems, prototype = self.functions[row]
+            cur.execute(sql, (name, get_idp_name(), nodes, edges, points, size, instructions, str(mnems), prototype))
+        
+        self.db.commit()
+        cur.close()
         return True
-    else:
+
+    def search(self, f):
+        name, nodes, edges, points, size, instructions, mnems, prototype = f
+        
+        cur = self.db.cursor()
+        sql = """ select name
+                    from functions
+                   where nodes = ?
+                     and edges = ?
+                     and points = ? 
+                     and size > 200 """
+        """             and size = ?
+                     and instructions = ? """
+        cur.execute(sql, (nodes, edges, points))#, size, instructions))
+        
+        res = None
+        for row in cur.fetchall():
+            res = row[0]
+        
+        cur.close()
+        
+        return res
+
+    def searchExact(self, f):
+        name, nodes, edges, points, size, instructions, mnems, prototype = f
+        
+        cur = self.db.cursor()
+        sql = """ select name, prototype
+                    from functions
+                   where processor = ?
+                     and nodes = ?
+                     and edges = ?
+                     and points = ?
+                     and size = ?
+                     and instructions = ?
+                     and mnemonics = ? """
+        cur.execute(sql, (get_idp_name(), nodes, edges, points, size, instructions, str(mnems)))
+        
+        res = None
+        for row in cur.fetchall():
+            res = row[0], row[1]
+        
+        cur.close()
+        
+        return res
+
+    def makeName(self, f, match):
+        if set_name(int(f), str(match), SN_AUTO|SN_PUBLIC):
+            return True
+
+        for i in range(100):
+            if set_name(int(f), str(match) + "_%d" % i, SN_AUTO|SN_PUBLIC):
+                return True
+        
         return False
 
-def GetCodeRefsFrom(ea):
-    name = get_func_name(ea)
-    ea = get_name_ea_simple(name)
-
-    f_start = ea
-    f_end = get_func_attr(ea, FUNCATTR_END)
-
-    ret = []
-    for chunk in idautils.Chunks(ea):
-        astart = chunk[0]
-        aend = chunk[1]
-        for head in idautils.Heads(astart, aend):
-            # If the element is an instruction
-            if is_code(get_full_flags(head)):
-                refs = idautils.CodeRefsFrom(head, 0)
-                for ref in refs:
-                    loc = get_name_ea_simple(get_func_name(ref))
-                    if loc not in ret and loc != f_start:
-                        ret.append(ref)
-
-    return ret
-
-def GetDataXrefString(ea):
-    name = get_func_name(ea)
-    ea = get_name_ea_simple(name)
-
-    f_start = ea
-    f_end = get_func_attr(ea, FUNCATTR_END)
-
-    ret = []
-    for chunk in idautils.Chunks(ea):
-        astart = chunk[0]
-        aend = chunk[1]
-        for head in idautils.Heads(astart, aend):
-            # If the element is an instruction
-            if is_code(get_full_flags(head)):
-                refs = list(idautils.DataRefsFrom(head))
-                for ref in refs:
-                    s = get_strlit_contents(ref, -1, STRTYPE_C)
-                    if not s or len(s) <= 4:
-                        s = get_strlit_contents(ref, -1, STRTYPE_C_16)
-                    
-                    if s:
-                        if len(s) > 4:
-                            ret.append(repr(s))
-
-    if len(ret) > 0:
-        return "\n\n" + "\n".join(ret)
-    else:
-        return ""
-
-def GetName(ea, resolve_imports=True):
-    name = get_func_name(ea)
-    if not name and resolve_imports:
-        name = get_ea_name(ea)
-    return name
-
-def GetFunctionStartEA(ea):
-    for x in idautils.FuncItems(ea):
-        return x
-    return ea
-
-##############################################
-"""Results List Window Creator with Choose2"""
-##############################################
-class UnsafeFunctionsChoose2(Choose):
-    class Item:
-        def __init__(self, item):
-            self.ea        = item['xref']
-            self.vfname    = item['func_name']
-        
-        def __str__(self):
-            return '%08x' % self.ea
-
-    def __init__(self, title, mynav=None):
-        Choose.__init__(self, title, [ ["Line", 8], ["Address", 10], ["Name", 30] ])
-        self.n = 0
-        self.items = []
-        self.item_relations = {}
-        self.icon = 41
-        self.mynav = mynav
-        #print "created", str(self)
-
-    def OnClose(self):
-        """space holder"""
-        #print "closed", str(self)
-
-    def OnEditLine(self, n):
-        """space holder"""
-        #print "editing", str(n)
-
-    def OnInsertLine(self):
-        """space holder"""
-        #print "insert line"
-
-    def OnSelectLine(self, n):
-        item = self.items[int(n)]
-        jumpto(self.item_relations[item[1]])
-
-    def OnGetLine(self, n):
-        return self.items[n]
-
-    def OnGetSize(self):
-        return len(self.items)
-
-    def OnDeleteLine(self, n):
-        """space holder"""
-        #print "del ",str(n)
-
-    def OnRefresh(self, n):
-        return n
-
-    def OnCommand(self, n, cmd_id):
-        # Aditional right-click-menu commands handles
-        if cmd_id == self.cmd_a:
-            """ Browse function """
-            item = self.items[int(n)]
-            ea = self.item_relations[item[1]]
-            ShowFunctionsBrowser(ea)
-        elif cmd_id == self.cmd_b:
-            """ Browse function showing APIs """
-            item = self.items[int(n)]
-            ea = self.item_relations[item[1]]
-            ShowFunctionsBrowser(ea, True)
-        elif cmd_id is not None and cmd_id == self.cmd_d:
-            """ Add data entry point """
-            item = self.items[int(n)]
-            ea = self.item_relations[item[1]]
-            self.mynav.addPoint(ea, "E")
-        elif cmd_id is not None and cmd_id == self.cmd_e:
-            """ Add target point """
-            item = self.items[int(n)]
-            ea = self.item_relations[item[1]]
-            self.mynav.addPoint(ea, "T")
-        elif cmd_id is not None and cmd_id == self.cmd_f:
-            item = self.items[int(n)]
-            ea = self.item_relations[item[1]]
-            self.mynav.removePoint(ea, "E")
-        elif cmd_id is not None and cmd_id == self.cmd_g:
-            item = self.items[int(n)]
-            ea = self.item_relations[item[1]]
-            self.mynav.removePoint(ea, "E")
+    def searchAll(self):
+        if self.start_ea is not None:
+            l = list(idautils.Functions(get_segm_start(self.start_ea), get_segm_end(self.end_ea)))
         else:
-            print ("Unknown command:", cmd_id, "@", n)
+            l = list(idautils.Functions())
+        
+        for f in l:
+            name = get_func_name(f)
             
-        return 1
-
-    def OnGetIcon(self, n):
-        r = self.items[n]
-        t = self.icon + r[1].count("*")
-        return t
-
-    def show(self):
-        t = self.Show()
-        if t < 0:
-            return False
-        
-        # create aditional actions handlers
-        self.cmd_a = self.AddCommand("Browse function")
-        self.cmd_b = self.AddCommand("Browse function (show APIs)")
-        
-        if self.mynav is not None:
-            self.ignore_me = self.AddCommand("-")
-            self.cmd_d = self.AddCommand("Add entry point")
-            self.cmd_e = self.AddCommand("Add target point")
-            self.cmd_f = self.AddCommand("Remove entry point")
-            self.cmd_g = self.AddCommand("Remove target point")
-        else:
-            self.cmd_d = None
-            self.cmd_e = None
-            self.cmd_f = None
-            self.cmd_g = None
-        
-        return True
-
-    def add_item(self, item):
-        if item.__str__() not in self.item_relations:
-            self.items.append([ "%08lu" % self.n, item.__str__(), item.vfname ])
-            self.item_relations[item.__str__()] = item.ea
-            self.n += 1
-
-    def OnGetLineAttr(self, n):
-        """space holder"""
-        pass
-
-class SessionsManager(Choose):
-
-    def __init__(self, title, nb = 5, mynav=None):
-        Choose.__init__(self, title, [ ["Session Name", 10] ])
-        self.n = 0
-        self.items = []
-        self.icon = 5
-        self.selcount = 0
-        self.mynav = mynav
-        print ("created", str(self))
-
-    def OnClose(self):
-        print ("closed", str(self))
-
-    def OnEditLine(self, n):
-        self.items[n][1] = self.items[n][1] + "*"
-        print ("editing", str(n))
-
-    def OnInsertLine(self):
-        self.items.append(self.make_item())
-        print ("insert line")
-
-    def OnSelectLine(self, n):
-        self.selcount += 1
-        Warning("[%02d] selectline '%s'" % (self.selcount, n))
-
-    def OnGetLine(self, n):
-        print ("getline", str(n))
-        return "kk" + str(self.items[n]) + "kk\n\n"
-
-    def OnGetSize(self):
-        print ("getsize")
-        return len(self.items)
-
-    def OnDeleteLine(self, n):
-        print ("del ",str(n))
-        del self.items[n]
-        return n
-
-    def OnRefresh(self, n):
-        print ("refresh", n)
-        return n
-
-    def OnCommand(self, n, cmd_id):
-        if cmd_id == self.cmd_a:
-            print ("command A selected @", n)
-        elif cmd_id == self.cmd_b:
-            print ("command B selected @", n)
-        else:
-            print ("Unknown command:", cmd_id, "@", n)
-        return 1
-
-    def OnGetIcon(self, n):
-        r = self.items[n]
-        t = self.icon + r[1].count("*")
-        print ("geticon", n, t)
-        return t
-
-    def show(self):
-        t = self.Show()
-        if t < 0:
-            return False
-        self.cmd_a = self.AddCommand("command A")
-        self.cmd_b = self.AddCommand("command B")
-        
-        return True
-
-    def add_item(self, item):
-        self.items.append(item)
-        self.n += 1
-
-    def OnGetLineAttr(self, n):
-        print ("getlineattr", n)
-        if n == 1:
-            return [0xFF0000, 0]
-
-class FunctionsBrowser(GraphViewer):
-    def __init__(self, title, father, session):
-        GraphViewer.__init__(self, title, False)
-        self.father = father
-        self.result = session
-        self.nodes = {}
-        self.totals = {}
-        self.last_level = []
-        self.max_level = 3
-        self.parents = False
-        self.is_new_father = False
-        self.old_father = False
-        self.show_runtime_functions = True
-        self.show_string = True
-        self.commands = {}
-        self.hidden = []
-        self.mynav = None
-
-    def addChildNodes(self, father):
-        self.addRequiredNodes(father, 0)
-        self.addEdges()
-        self.addSeeMoreNodes(father)
-
-    def addSeeMoreNodes(self, father):
-        for ea in self.last_level:
-            total = len(GetCodeRefsFrom(ea))
-            if self.totals.has_key(ea):
-                total = total - self.totals[ea]
-            
-            if total > 0:
-                self.nodes[str(ea)] = self.AddNode((ea, "(%d more nodes)" % total))
-                self.AddEdge(self.nodes[ea], self.nodes[str(ea)])
-
-    def addEdges(self):
-        l = self.nodes.keys()
-        for ea in l:
-            refs = GetCodeRefsFrom(ea)
-            for ref in refs:
-                if ref in l:
-                    self.AddEdge(self.nodes[ea], self.nodes[ref])
-                    if self.totals.has_key(ea):
-                        self.totals[ea] += 1
-                    else:
-                        self.totals[ea] = 0
-        
-        if self.is_new_father:
-            self.nodes[self.old_father] = self.AddNode((self.old_father, "Return ..."))
-            self.AddEdge(self.nodes[self.old_father], self.nodes[self.father])
-
-    def addRequiredNodes(self, father, level=0):
-        for ea in GetCodeRefsFrom(father):
-            ea = GetFunctionStartEA(ea)
-            if not self.nodes.has_key(ea):
-                if isFuncLib(ea) and not self.show_runtime_functions:
-                    continue
-                
-                name = GetName(ea, True)
-                if name:
-                    if self.show_string:
-                        name += GetDataXrefString(ea)
-                    
-                    if ea not in self.hidden:
-                        self.nodes[ea] = self.AddNode((ea, name))
-                        
-                        if level < self.max_level:
-                            self.addRequiredNodes(ea, level+1)
-                        elif level == self.max_level:
-                            self.last_level.append(ea)
-
-    def OnRefresh(self):
-        try:
-            self.Clear()
-            self.nodes = {}
-            self.totals = {}
-            self.last_level = []
-            self.nodes[self.father] = self.AddNode((self.father, get_func_name(self.father)))
-            self.addChildNodes(self.father)
-            
-            return True
-        except:
-            print ("***Error, hamen", sys.exc_info()[1])
-            return True
-
-    def OnGetText(self, node_id):
-        ea, label = self[node_id]
-        flags = get_func_attr(ea)
-        
-        if label == "Return ...":
-            color = 0xfff000
-            return (label, color)
-        elif node_id == 0:
-            color = 0x00f000
-            return (label, color)
-        elif flags & FUNC_LIB or flags == -1 or label.startswith("."):
-            color = 0xf000f0
-            return (label, color)
-        else:
-            return label
-    
-    def OnHint(self, node_id):
-        x = self.OnGetText(node_id)
-        if len(x) == 2:
-            return x[0]
-        else:
-            return x
-
-    def OnDblClick(self, node_id):
-        ea, label = self[node_id]
-        
-        if label.startswith("("):
-            self.is_new_father = True
-            self.old_father = self.father
-            self.father = ea
-            self.Refresh()
-        elif label == "Return ...":
-            self.is_new_father = False
-            self.father = self.old_father
-            self.Refresh()
-        else:
-            jumpto(ea)
-        
-        return True
-
-    def OnSelect(self, node_id):
-        return True
-
-    def Show(self):
-        if not GraphViewer.Show(self):
-            return False
-        """
-        if self.mynav is not None and False:
-            cmd = self.AddCommand("Open graph", "Ctrl+O")
-            self.commands[cmd] = "open"
-            cmd = self.AddCommand("Save graph", "Ctrl+O")
-            self.commands[cmd] = "save"
-            cmd = self.AddCommand("-", "")
-            self.commands[cmd] = "-"
-        """
-        cmd = self.AddCommand("Refresh", "")
-        self.commands[cmd] = "refresh"
-        cmd = self.AddCommand("Show/hide node", "Ctrl+H")
-        self.commands[cmd] = "hide"
-        cmd = self.AddCommand("Show/hide strings", "")
-        self.commands[cmd] = "strings"
-        cmd = self.AddCommand("Show/hide API calls", "")
-        self.commands[cmd] = "apis"
-        cmd = self.AddCommand("Show all nodes", "Ctrl+A")
-        self.commands[cmd] = "unhide"
-        cmd = self.AddCommand("Select recursion level", "")
-        self.commands[cmd] = "recursion"
-        cmd = self.AddCommand("- ", "")
-        self.commands[cmd] = "-"
-        
-        return True
-
-    def OnCommand(self, cmd_id):
-        try:
-            cmd = self.commands[cmd_id]
-            if cmd == "refresh":
-                self.Refresh()
-            elif cmd == "hide":
-                l = {}
-                i = 0
-                for x in self.nodes:
-                    name = get_func_name(int(x))
-                    if name and name != "":
-                        l[i] = name
-                        i += 1
-                for x in self.hidden:
-                    name = get_func_name(int(x))
-                    if name and name != "":
-                        l[i] = name
-                        i += 1
-                
-                chooser = Choose([], "Show/Hide functions", 3)
-                chooser.width = 50
-                chooser.list = l
-                c = chooser.choose()
-                
-                if c:
-                    c = c - 1
-                    c = get_name_ea_simple(l[c])
-                    
-                    if c in self.hidden:
-                        self.hidden.remove(c)
-                    else:
-                        self.hidden.append(c)
-                    self.Refresh()
-            elif cmd == "unhide":
-                self.hidden = []
-                self.Refresh()
-            elif cmd == "strings":
-                self.show_string = not self.show_string
-                self.Refresh()
-            elif cmd == "apis":
-                self.show_runtime_functions = not self.show_runtime_functions
-                self.Refresh()
-            elif cmd == "recursion":
-                num = STRTYPE_C(self.max_level, "Maximum recursion level")
-                if num:
-                    self.max_level = num
-                    self.Refresh()
-            elif cmd == "open":
-                g = self.mynav.showSavedGraphs()
-                if g:
-                    nodes, hidden = self.mynav.loadSavedGraphNodes(g)
-                    name, ea, level, strings, runtime = self.mynav.loadSavedGraphData(g)
-                    self.title = name
-                    self.father = ea
-                    self.max_level = level
-                    self.show_runtime_functions = runtime
-                    self.show_string = strings
-                    self.hidden = hidden
-                    self.result = nodes
-                    self.Refresh()
-            elif cmd == "save":
-                self.mynav.saveGraph(self.father, self.max_level, self.show_runtime_functions, \
-                                     self.show_string, self.hidden, self.result)
-        except:
-            print ("OnCommand:", sys.exc_info()[1])
-        
-        return True
-
-class PathsBrowser(GraphViewer):
-    def __init__(self, title, nodes, start, target, hits = []):
-        GraphViewer.__init__(self, title, False)
-        if type(start) is not type([]):
-            self.start = [start]
-        else:
-            self.start = start
-        
-        if type(target) is not type([]):
-            self.target = [target]
-        else:
-            self.target = target
-        
-        self.result = nodes
-        self.nodes = {}
-        self.added = []
-        self.hits = []
-
-    def addNodes(self):
-        for node in self.result:
-            name = get_func_name(node)
-            if not name:
+            if not name.startswith("sub_"):
+                print ("skipping %s" % name)
                 continue
             
-            if name not in self.added:
-                try:
-                    self.nodes[get_name_ea_simple(name)] = self.AddNode((get_name_ea_simple(name), name))
-                    self.added.append(name)
-                except:
-                    print ("Error adding node", sys.exc_info()[1])
-
-    def addEdges(self):
-        for ea in self.result:
-            refs = GetCodeRefsFrom(ea)
-            for ref in refs:
-                name = get_func_name(ref)
-                name2 = get_func_name(ea)
-                try:
-                    if name in self.added:
-                        self.AddEdge(self.nodes[get_name_ea_simple(name2)], self.nodes[get_name_ea_simple(name)])
-                        self.added.append((ea, ref))
-                except:
-                    print ("Error", sys.exc_info()[1])
-
-    def OnRefresh(self):
-        self.Clear()
-        self.added = []
-        self.addNodes()
-        self.addEdges()
-        
-        return True
-
-    def OnGetText(self, node_id):
-        try:
-            ea, label = self[node_id]
-            flags = get_func_attr(ea)
+            flags = get_func_attr(f, 8) # 8 = FUNCATTR_FLAGS
+            if flags & FUNC_LIB or flags == -1:
+                continue
             
-            if ea in self.start or ea in self.target or ea in self.hits:
-                color = 0x00f000
-                return (label, color)
-            elif flags & FUNC_LIB or flags == -1 or label.startswith("."):
-                color = 0xf000f0
-                return (label, color)
-            else:
-                return label
-        except:
-            label = str(sys.exc_info()[1])
-            #return "Error " + str(label) + " EA 0x%08x" % ea
-            return "oxtixe"
-
-    def OnDblClick(self, node_id):
-        ea, label = self[node_id]
-        jumpto(ea)
-        
-        return True
-
-    def OnCommand(self, cmd_id):
-        """
-        Triggered when a menu command is selected through the menu or its hotkey
-        @return: None
-        """
-        if self.cmd_close == cmd_id:
-            self.Close()
-            return
-        
-        #print "command:", cmd_id
-
-    def Show(self):
-        if not GraphViewer.Show(self):
-            return False
-        
-        self.cmd_close = self.AddCommand("Close", "ESC")
-        if self.cmd_close == 0:
-            print ("Failed to add popup menu item!")
-        
-        return True
-
-class StringsBrowser(GraphViewer):
-    def __init__(self, title, elements):
-        GraphViewer.__init__(self, title, False)
-        self.elements = elements
-        self.nodes = {}
-        self.added_names = []
-
-    def OnGetText(self, node_id):
-        try:
-            ea, label, mtype = self[node_id]
-            if mtype == -1:
-                return str(label)
-            elif mtype == 1:
-                color = 0x00f000
-                return (label, color)
-            elif mtype == 0:
-                color = 0xf000f0
-                return (label, color)
-        except:
-            return "Error"#: " + str(sys.exc_info()[1])
-        
-        """print "EA", ea
-        print "LABEL", label
-        flags = get_func_attr(ea)
-        
-        if ea in self.start or ea in self.target or ea in self.hits:
-            color = 0x00f000
-            return (label, color)
-        elif flags & FUNC_LIB or flags == -1:
-            color = 0xf000f0
-            return (label, color)
-        else:
-            return label"""
-
-    def OnDblClick(self, node_id):
-        ea, label, mtype = self[node_id]
-        
-        if ea != 0:
-            jumpto(ea)
-        return True
-
-    def OnRefresh(self):
-        
-        try:
-            self.Clear()
-            self.added_names = []
-            self.nodes = {}
+            x = self.readFunction(f, False)
             
-            sessions = {}
-            addresses = []
-            strings = []
-            
-            for x in self.elements:
-                if not sessions.has_key(x[0]):
-                    sessions[x[0]] = []
-                sessions[x[0]].append((x[1], x[2]))
-            
-            for s in sessions:
-                cur_node = self.AddNode((0, "Session " + s, -1))
+            if x:
+                ret = self.searchExact(x)
+                if ret:
+                    match, prototype = ret
+                else:
+                    match = None
+
+                if match:
+                    print ("%08x Function %s exact matches with %s" % (f, get_func_name(f), match))
+                    try:
+                        self.makeName(int(f), str(match))
+                    except:
+                        print ("  %08x Cannot rename function" % f)
+                        print (sys.exc_info()[1])
                 
-                for addr, string in sessions[s]:
-                    addr = int(addr)
-                    name = get_func_name(addr)
-                    if name in self.added_names:
-                        continue
-                    else:
-                        self.added_names.append(name)
-                    
-                    if not self.nodes.has_key(addr):
-                        self.nodes[addr] = self.AddNode((addr, get_func_name(addr), 0))
-                    self.AddEdge(cur_node, self.nodes[addr])
-                    if not self.nodes.has_key(string):
-                        self.nodes[string] = self.AddNode((addr, string, 1))
-                    self.AddEdge(self.nodes[addr], self.nodes[string])
-        except:
-            print ("Error refresh", sys.exc_info()[1])
+                    try:
+                        pos = prototype.find("(")
+                        if pos > -1:
+                            if prototype.find(">(") > -1:
+                                pos = prototype.find("<")
+                            prototype = str(prototype[:pos] + " x" + prototype[pos:])
+                            print (repr(prototype))
+                            print ("%08x Function %s's type is %s" % (f, get_func_name(f), prototype))
+                            SetType(int(f), prototype)
+                    except:
+                        print ("  %08x Cannot change the type of the function (type %s)" % (f, prototype))
+                        print (sys.exc_info()[1])
+                else:
+                    match = self.search(x)
+                    if match:
+                        print ("%08x Function %s partially matches with %s" % (f, get_func_name(f), match))
+                        try:
+                            set_cmt(f, str(match), 0)
+                        except:
+                            print ("  %08x Cannot rename function" % f)
+                            print (sys.exc_info()[1])
+
+    def readFunction(self, f, discard=True):
+        name = get_func_name(f)
+        func = get_func(f)
+        flow = FlowChart(func)
+        size = func.endEA - func.startEA
         
-        return True
+        if discard:
+            # Unnamed function, ignore it...
+            if name.startswith("sub_") or name.startswith("j_") or name.startswith("unknown"):
+                return False
+            
+            # Already recognized runtime's function
+            flags = get_func_attr(f)
+            if flags & FUNC_LIB or flags == -1:
+                return False
+        
+        nodes = 0
+        edges = 0
+        points = 0
+        instructions = 0
+        mnems = []
+        dones = {}
+        
+        for block in flow:
+            nodes += 1
+            indegree = 0
+            outdegree = 0
+            for succ_block in block.succs():
+                edges += 1
+                indegree += 1
+                if not dones.has_key(succ_block.id):
+                    dones[succ_block] = 1
+                    for x in list(idautils.Heads(succ_block.startEA, succ_block.endEA)):
+                        instructions += 1
+                        mnems.append(print_insn_mnem(x))
+            
+            for pred_block in block.preds():
+                edges += 1
+                outdegree += 1
+                if not dones.has_key(succ_block.id):
+                    dones[succ_block] = 1
+                    for x in list(idautils.Heads(succ_block.startEA, succ_block.endEA)):
+                        instructions += 1
+                        mnems.append(print_insn_mnem(x))
+            
+            if indegree > 0:
+                points += indegree
+            if outdegree > 0:
+                points += outdegree
+        
+        if nodes > 1 and instructions > 0 and edges > 1:
+            myexport_print("Exporter: Current function 0x%08x %s" % (f, name))
+            return (name, nodes, edges, points, size, instructions, mnems, get_type(f))
+        
+        return False
 
-def ShowStringsGraph(l):
-    g = StringsBrowser("Strings browser", l)
-    g.Show()
+    def getFunctions(self):
+        for f in list(idautils.Functions()):
+            x = self.readFunction(f)
+            if x:
+                self.functions[f] = x
+            
+        return self.functions
 
-def ShowFunctionsBrowser(mea=None, show_runtime=False, show_string=True, mynav=None):
-    try:
-        if mea is None:
-            ea = get_screen_ea()
+    def export(self, filename=None):
+        self.initialize()
+        
+        if filename is None:
+            f = ask_file(1, "*.sqlite", "Select database to export")
+            f = os.path.join(get_user_idadir() + '/plugins/test.sqlite')
         else:
-            ea = mea
+            f = filename
         
-        num = STRTYPE_C(3, "Maximum recursion level")
-        if not num:
-            return
-        
-        result = list(idautils.CodeRefsFrom(ea, BADADDR))
-        g = FunctionsBrowser("Code Refs Browser %s" % get_func_name(ea), ea, result)
-        g.max_level = num
-        g.show_string = True
-        g.show_runtime_functions = show_runtime
-        g.mynav = mynav
-        return mynav
-        g.Show()
-    except:
-        print ("Error", sys.exc_info()[1])
-
-def ShowGraph(name, ea, funcs, hidden, level, strings, runtime, mynav):
-    g = FunctionsBrowser("Saved graph: %s" % name, ea, funcs)
-    g.hidden = hidden
-    g.max_level = level
-    g.show_string = strings
-    g.show_runtime = runtime
-    g.mynav = mynav
-    g.Show()
-
-def SearchCodePath(start_ea, target_ea, extended = False):
-    nodes = []
-    sea_nodes = []
-    tea_nodes = []
-    seas = [start_ea]
-    teas = [target_ea]
-    i = 0
-    if extended:
-        max_times = 5
-    else:
-        max_times = 10
-
-    while True:
-        i += 1
-        if i > max_times or len(seas) == 0 or len(teas) == 0:
-            break
-        
-        for sea in seas:
-            refs = GetCodeRefsFrom(sea)
-            for ref in refs:
-                if ref in sea_nodes:
-                    continue
-                #print "START: Function %s" % get_func_name(ref)
-                sea_nodes.append(ref)
-                if ref == target_ea or ref in tea_nodes:
-                    nodes.append(target_ea)
-                    nodes.extend(sea_nodes)
-                    nodes.extend(tea_nodes)
-                    nodes.append(start_ea)
-                    break
-            seas = sea_nodes
-        if extended:
-            for tea in teas:
-                refs = idautils.CodeRefsTo(tea, True)
-                for ref in refs:
-                    if ref in tea_nodes:
-                        continue
-                    #print "TARGET: Function %s" % get_func_name(ref)
-                    tea_nodes.append(ref)
-                    if ref == start_ea or ref in sea_nodes:
-                        nodes.append(target_ea)
-                        nodes.extend(sea_nodes)
-                        nodes.extend(tea_nodes)
-                        nodes.append(start_ea)
-                        break
-                teas = tea_nodes
-
-    return nodes
-
-def SearchCodePathDialog(ret_only=False, extended=False):
-    f1 = choose_func("Select starting function", 0)
-    if not f1:
-        return
-    sea = f1.startEA
+        if f:
+            myexport_print("Reading functions...")
+            self.getFunctions()
+            self.createDatabase(f)
+            myexport_print("Exporting functions...")
+            self.saveDatabase()
+            self.closeDatabase()
+            myexport_print("Done")
     
-    f2 = choose_func("Select target function", get_screen_ea())
-    if not f2:
-        return
-    tea = f2.startEA
-
-    nodes = SearchCodePath(sea, tea, extended)
-    if len(nodes) > 0:
-        if ret_only:
-            return nodes
+    def doImport(self, filename=None):
+        self.initialize()
+        
+        if filename is None:
+            f = ask_file(0, "*.sqlite", "Select database to import")
+            os.path.join(get_user_idadir() + '/plugins/test.sqlite')
         else:
-            g = PathsBrowser("Code paths from %s to %s" % (get_func_name(sea),
-                                                           get_func_name(tea)),
-                                                           nodes, sea, tea)
-            g.Show()
-    else:
-        info("No codepath found between %s and %s" % (get_func_name(sea), get_func_name(tea)))
-        return nodes
+            f = filename
+        
+        if f:
+            print("file is", f)
+            self.openDatabase(f)
+            self.searchAll()
 
+# ------------------------------------------------
+# Only called when accesed directly
 def PLUGIN_ENTRY():
-    #ShowFunctionsBrowser(show_runtime=True)
     try:
-        #SearchCodePathDialog()
-        return ShowFunctionsBrowser(show_string=True)
+        res = ask_yn(1, "Do you want to export (YES) or import (NO)?")
+        exporter = CFunctionsMatcher()
+        if res == 1:
+            exporter.export()
+        elif res == 0:
+            exporter.doImport()
     except:
-        print ("***Error:", sys.exc_info()[1])
+        print("Error:", sys.exc_info()[1])
+        traceback.print_exc(file=sys.stdout)
 
 if __name__ == "__main__":
     PLUGIN_ENTRY()
